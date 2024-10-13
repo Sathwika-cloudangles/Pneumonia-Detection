@@ -3,58 +3,33 @@ from torch.utils.data import Dataset
 import os
 from xml.etree import ElementTree as ET
 import glob as glob
-import torch
 import cv2
 import numpy as np
 import random
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-from torchvision import transforms as transforms
+from torchvision import transforms as T
+from torchvision.transforms import ToPILImage
 import dill as pickle
 
 def transform_data():
-    # os.system("python3.10 annot2xml.py")
     # Define the training transforms
-    def get_train_aug():
-        return A.Compose([
-            A.MotionBlur(blur_limit=3, p=0.5),
-            A.Blur(blur_limit=3, p=0.5),
-            A.RandomBrightnessContrast(
-                brightness_limit=0.2, p=0.5
-            ),
-            A.ColorJitter(p=0.5),
-            A.RandomGamma(p=0.2),
-            A.RandomFog(p=0.2),
-            ToTensorV2(p=1.0),
-        ], bbox_params={
-            'format': 'pascal_voc',
-            'label_fields': ['labels']
-        })
-
     def get_train_transform():
-        return A.Compose([
-            ToTensorV2(p=1.0),
-        ], bbox_params={
-            'format': 'pascal_voc',
-            'label_fields': ['labels']
-        })
+        return T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomRotation(30),
+            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
+            T.ToTensor(),  # Ensure the output is a tensor
+        ])
 
-    # Define the validation transforms
     def get_valid_transform():
-        return A.Compose([
-            ToTensorV2(p=1.0),
-        ], bbox_params={
-            'format': 'pascal_voc', 
-            'label_fields': ['labels']
-        })
+        return T.Compose([
+            T.ToTensor(),  # Convert the image to a tensor
+        ])
 
     class CustomDataset(Dataset):
-        def __init__(
-            self, images_path, labels_path, labels_txt, directory,
-            width, height, classes, transforms=None, 
-            use_train_aug=False,
-            train=False, mosaic=False
-        ):
+        def __init__(self, images_path, labels_path, labels_txt, directory,
+                     width, height, classes, transforms=None, 
+                     use_train_aug=False,
+                     train=False, mosaic=False):
             self.transforms = transforms
             self.use_train_aug = use_train_aug
             self.images_path = images_path
@@ -83,14 +58,13 @@ def transform_data():
             image_name = self.all_images[index]
             image_path = os.path.join(self.images_path, image_name)
 
-            # Read the image.
+            # Read the image
             image = cv2.imread(image_path)
-            # Convert BGR to RGB color format.
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32)
             image_resized = cv2.resize(image, (self.width, self.height))
             image_resized /= 255.0
 
-            # Capture the corresponding XML file for getting the annotations.
+            # Capture the corresponding XML file for getting the annotations
             annot_filename = image_name[:-4] + '.xml'
             annot_file_path = os.path.join(self.labels_path, annot_filename)
 
@@ -100,11 +74,11 @@ def transform_data():
             tree = ET.parse(annot_file_path)
             root = tree.getroot()
 
-            # Get the height and width of the image.
+            # Get the height and width of the image
             image_width = image.shape[1]
             image_height = image.shape[0]
 
-            # Box coordinates for xml files are extracted and corrected for image size given.
+            # Box coordinates for xml files are extracted and corrected for image size
             for member in root.findall('object'):
                 labels.append(self.classes.index(member.find('Target').text))
                 x_center = float(member.find('x').text)
@@ -119,7 +93,7 @@ def transform_data():
 
                 # Ensure xmax and ymax are not greater than the image dimensions
                 ymax, xmax = self.check_image_and_annotation(xmax, ymax, image_width, image_height)
-                
+
                 # Filter out invalid boxes (zeros or NaN)
                 if not (xmax <= xmin or ymax <= ymin or np.isnan(xmin) or np.isnan(ymin) or np.isnan(xmax) or np.isnan(ymax)):
                     orig_boxes.append([xmin, ymin, xmax, ymax])
@@ -135,7 +109,7 @@ def transform_data():
                 return image, image_resized, [], [], [], None, None, (image_width, image_height)
             if boxes.ndim == 1:
                 boxes = boxes.unsqueeze(0)
-            
+
             area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]) if len(boxes) > 0 else torch.as_tensor([], dtype=torch.float32)
             iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
             labels = torch.as_tensor(labels, dtype=torch.int64)
@@ -143,10 +117,7 @@ def transform_data():
             return image, image_resized, orig_boxes, boxes, labels, area, iscrowd, (image_width, image_height)
 
         def check_image_and_annotation(self, xmax, ymax, width, height):
-            """
-            Check that all x_max and y_max are not more than the image
-            width or height.
-            """
+            """Check that all x_max and y_max are not more than the image width or height."""
             if ymax > height:
                 ymax = height
             if xmax > width:
@@ -155,26 +126,15 @@ def transform_data():
 
         def __getitem__(self, idx):
             print("Index-----------------------", idx)
-            # Capture the image name and the full image path.
+            # Load image and labels
             if not self.mosaic:
                 image, image_resized, orig_boxes, boxes, \
-                    labels, area, iscrowd, dims = self.load_image_and_labels(
-                    index=idx
-                )
-
-            if self.train and self.mosaic:
-                while True:
-                    image, image_resized, boxes, labels, \
-                        area, iscrowd, dims = self.load_cutmix_image_and_boxes(
-                        idx, resize_factor=(self.height, self.width)
-                    )
-                    if len(boxes) > 0:
-                        break
+                    labels, area, iscrowd, dims = self.load_image_and_labels(idx)
 
             boxes = torch.as_tensor(boxes, dtype=torch.float32)
             labels = torch.as_tensor(labels, dtype=torch.int64)
 
-            # Prepare the final `target` dictionary.
+            # Prepare the final `target` dictionary
             target = {}
             target["boxes"] = boxes
             target["labels"] = labels
@@ -182,22 +142,19 @@ def transform_data():
             target["iscrowd"] = iscrowd
             image_id = torch.tensor([idx])
             target["image_id"] = image_id
-            
-            if self.use_train_aug:  # Use train augmentation if argument is passed.
-                train_aug = get_train_aug()
-                sample = train_aug(image=image_resized,
-                                        bboxes=target['boxes'],
-                                        labels=labels)
-                image_resized = sample['image']
-                target['boxes'] = torch.Tensor(sample['bboxes'])
-            else:
-                sample = self.transforms(image=image_resized,
-                                        bboxes=target['boxes'],
-                                        labels=labels)
-                image_resized = sample['image']
-                target['boxes'] = torch.Tensor(sample['bboxes'])
 
+            # Convert to PIL Image before applying transforms
+            image_resized = ToPILImage()(image_resized)  # Convert NumPy array to PIL Image
+
+            # Apply transformations directly to the PIL image
+            if self.use_train_aug:  # Use train augmentation if argument is passed.
+                image_resized = self.transforms(image_resized)
+            else:
+                image_resized = self.transforms(image_resized)
+
+            # Return image as tensor directly from transforms
             return image_resized, target
+
 
         def __len__(self):
             return len(self.all_images)
@@ -229,7 +186,7 @@ def transform_data():
     )
     print("Valid Dataset: ", valid_dataset)
     
-    i, a = train_dataset[20]
+    i, a = train_dataset[15]
     print("Image: ", i)
     print("Annotations: ", a)
     
@@ -239,6 +196,6 @@ def transform_data():
     with open('valid_dataset.pkl', 'wb') as f:
         pickle.dump(valid_dataset, f)
 
-    return train_dataset
+    return train_dataset 
 
 transform_data()
