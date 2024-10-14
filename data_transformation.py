@@ -158,11 +158,8 @@ def transform_data():
             image_id = torch.tensor([idx])
             target["image_id"] = image_id
 
-            # Convert image back to uint8 before using ToPILImage
-            image_resized = (image_resized * 255).astype(np.uint8)
-
-            # Convert to PIL Image before applying transforms
-            image_resized = ToPILImage()(image_resized)  # Convert NumPy array to PIL Image
+            image_resized = (image_resized * 255).astype(np.uint8)  # Ensure the values are within uint8 range
+            image_resized = ToPILImage()(image_resized)  # Convert to PIL image
 
             # Apply transformations directly to the PIL image
             if self.use_train_aug:  # Use train augmentation if argument is passed.
