@@ -55,28 +55,30 @@ def transform_data():
         def load_image_and_labels(self, index):
             if index >= len(self.all_images):
                 raise IndexError("Index out of range")
+            
             image_name = self.all_images[index]
             image_path = os.path.join(self.images_path, image_name)
 
             # Read the image
             image = cv2.imread(image_path)
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32)
+            orig_height, orig_width, _ = image.shape
+
+            # Resize the image
             image_resized = cv2.resize(image, (self.width, self.height))
             image_resized /= 255.0
+            
+            print(image_resized)
 
             # Capture the corresponding XML file for getting the annotations
             annot_filename = image_name[:-4] + '.xml'
             annot_file_path = os.path.join(self.labels_path, annot_filename)
 
             boxes = []
-            orig_boxes = []
             labels = []
+
             tree = ET.parse(annot_file_path)
             root = tree.getroot()
-
-            # Get the height and width of the image
-            image_width = image.shape[1]
-            image_height = image.shape[0]
 
             # Box coordinates for xml files are extracted and corrected for image size
             for member in root.findall('object'):
@@ -86,35 +88,48 @@ def transform_data():
                 width = float(member.find('width').text)
                 height = float(member.find('height').text)
 
-                xmin = (x_center - width / 2) * image_width
-                ymin = (y_center - height / 2) * image_height
-                xmax = (x_center + width / 2) * image_width
-                ymax = (y_center + height / 2) * image_height
+                # Original bounding box coordinates in terms of the original image
+                xmin = (x_center - width / 2) * orig_width
+                ymin = (y_center - height / 2) * orig_height
+                xmax = (x_center + width / 2) * orig_width
+                ymax = (y_center + height / 2) * orig_height
 
-                # Ensure xmax and ymax are not greater than the image dimensions
-                ymax, xmax = self.check_image_and_annotation(xmax, ymax, image_width, image_height)
+                # Ensure coordinates are within image bounds
+                xmin = max(0, xmin)
+                ymin = max(0, ymin)
+                xmax = min(orig_width, xmax)
+                ymax = min(orig_height, ymax)
 
-                # Filter out invalid boxes (zeros or NaN)
-                if not (xmax <= xmin or ymax <= ymin or np.isnan(xmin) or np.isnan(ymin) or np.isnan(xmax) or np.isnan(ymax)):
-                    orig_boxes.append([xmin, ymin, xmax, ymax])
-                    xmin_final = (xmin/image_width) * self.width
-                    xmax_final = (xmax/image_width) * self.width
-                    ymin_final = (ymin/image_height) * self.height
-                    ymax_final = (ymax/image_height) * self.height
-                    boxes.append([xmin_final, ymin_final, xmax_final, ymax_final])
+                if xmax <= xmin or ymax <= ymin:
+                    continue  # Skip invalid boxes
 
-            # Handle zero-length boxes and NaN
+                # Now scale the bounding box to match the resized image dimensions
+                xmin_resized = (xmin / orig_width) * self.width
+                ymin_resized = (ymin / orig_height) * self.height
+                xmax_resized = (xmax / orig_width) * self.width
+                ymax_resized = (ymax / orig_height) * self.height
+
+                xmin_resized = max(0, min(self.width, xmin_resized))
+                ymin_resized = max(0, min(self.height, ymin_resized))
+                xmax_resized = max(0, min(self.width, xmax_resized))
+                ymax_resized = max(0, min(self.height, ymax_resized))
+                
+                # Add the resized bounding box to the list
+                boxes.append([xmin_resized, ymin_resized, xmax_resized, ymax_resized])
+
+            # Convert boxes and labels to tensors
             boxes = torch.as_tensor(boxes, dtype=torch.float32)
-            if len(boxes) == 0:
-                return image, image_resized, [], [], [], None, None, (image_width, image_height)
-            if boxes.ndim == 1:
-                boxes = boxes.unsqueeze(0)
-
-            area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]) if len(boxes) > 0 else torch.as_tensor([], dtype=torch.float32)
-            iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
             labels = torch.as_tensor(labels, dtype=torch.int64)
 
-            return image, image_resized, orig_boxes, boxes, labels, area, iscrowd, (image_width, image_height)
+            if boxes.shape[0] == 0:
+                return image, image_resized, [], [], [], None, None, (orig_width, orig_height)
+
+            # Calculate area and other target data
+            area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
+            iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
+
+            return image, image_resized, boxes, labels, area, iscrowd, (orig_width, orig_height)
+
 
         def check_image_and_annotation(self, xmax, ymax, width, height):
             """Check that all x_max and y_max are not more than the image width or height."""
@@ -128,7 +143,7 @@ def transform_data():
             print("Index-----------------------", idx)
             # Load image and labels
             if not self.mosaic:
-                image, image_resized, orig_boxes, boxes, \
+                image, image_resized, boxes, \
                     labels, area, iscrowd, dims = self.load_image_and_labels(idx)
 
             boxes = torch.as_tensor(boxes, dtype=torch.float32)
@@ -143,6 +158,9 @@ def transform_data():
             image_id = torch.tensor([idx])
             target["image_id"] = image_id
 
+            # Convert image back to uint8 before using ToPILImage
+            image_resized = (image_resized * 255).astype(np.uint8)
+
             # Convert to PIL Image before applying transforms
             image_resized = ToPILImage()(image_resized)  # Convert NumPy array to PIL Image
 
@@ -152,9 +170,7 @@ def transform_data():
             else:
                 image_resized = self.transforms(image_resized)
 
-            # Return image as tensor directly from transforms
             return image_resized, target
-
 
         def __len__(self):
             return len(self.all_images)
@@ -186,7 +202,7 @@ def transform_data():
     )
     print("Valid Dataset: ", valid_dataset)
     
-    i, a = train_dataset[15]
+    i, a = train_dataset[1347]
     print("Image: ", i)
     print("Annotations: ", a)
     
