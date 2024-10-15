@@ -1,173 +1,144 @@
 import torch
 from torch.utils.data import Dataset
 import os
-from xml.etree import ElementTree as ET
-import glob as glob
+import glob
 import cv2
 import numpy as np
-import random
 from torchvision import transforms as T
 from torchvision.transforms import ToPILImage
 import dill as pickle
+from xml.etree import ElementTree as ET
 
 def transform_data():
-    # Define the training transforms
     def get_train_transform():
         return T.Compose([
             T.RandomHorizontalFlip(),
             T.RandomRotation(30),
             T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
-            T.ToTensor(),  # Ensure the output is a tensor
+            T.ToTensor(),
         ])
 
     def get_valid_transform():
         return T.Compose([
-            T.ToTensor(),  # Convert the image to a tensor
+            T.ToTensor(),
         ])
 
     class CustomDataset(Dataset):
-        def __init__(self, images_path, labels_path, labels_txt, directory,
-                     width, height, classes, transforms=None, 
-                     use_train_aug=False,
-                     train=False, mosaic=False):
+        def __init__(self, images_path, labels_path, directory, width, height, classes, transforms=None):
             self.transforms = transforms
-            self.use_train_aug = use_train_aug
             self.images_path = images_path
             self.labels_path = labels_path
             self.directory = directory
-            self.labels_txt = labels_txt
             self.height = height
             self.width = width
             self.classes = classes
-            self.train = train
-            self.mosaic = mosaic
             self.image_file_types = ['*.jpg', '*.jpeg', '*.png', '*.ppm']
             self.all_image_paths = []
-            
-            # Get all the image paths in sorted order
+
             for file_type in self.image_file_types:
                 self.all_image_paths.extend(glob.glob(os.path.join(self.images_path, file_type)))
-            self.all_annot_paths = glob.glob(os.path.join(self.labels_path, '*.xml'))
             self.all_images = [image_path.split(os.path.sep)[-1] for image_path in self.all_image_paths]
             self.all_images = sorted(self.all_images)
-            print("Number of images:-----------------", len(self.all_images))
+            print("Number of images: ", len(self.all_images))
 
-        def load_image_and_labels(self, index):
-            if index >= len(self.all_images):
-                raise IndexError("Index out of range")
+        def load_img(self, img_path):
+            # Load the image
+            print("img_path-------------------", img_path)
+            image = cv2.imread(img_path)
             
-            image_name = self.all_images[index]
-            image_path = os.path.join(self.images_path, image_name)
-
-            # Read the image
-            image = cv2.imread(image_path)
+            # Check if the image was loaded successfully
+            if image is None:
+                raise ValueError(f"Image not found or unable to load: {img_path}")
+            
+            # Convert the image from BGR to RGB
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32)
-            orig_height, orig_width, _ = image.shape
+            return image
 
-            # Resize the image
-            image_resized = cv2.resize(image, (self.width, self.height))
-            image_resized /= 255.0
-            
-            print(image_resized)
+        def normalize_bbox(self, bboxes, rows, cols):
+            norm_bboxes = np.zeros_like(bboxes)
+            if cols > 0 and rows > 0:
+                norm_bboxes[:, 0] = bboxes[:, 0] / cols
+                norm_bboxes[:, 1] = bboxes[:, 1] / rows
+                norm_bboxes[:, 2] = bboxes[:, 2] / cols
+                norm_bboxes[:, 3] = bboxes[:, 3] / rows
+            return norm_bboxes
 
-            # Capture the corresponding XML file for getting the annotations
-            annot_filename = image_name[:-4] + '.xml'
-            annot_file_path = os.path.join(self.labels_path, annot_filename)
+        def __getitem__(self, index):
+        
+            try:
+                image_id = self.all_images[index][:-4]
+                annot_file_path = os.path.join(self.labels_path, f"{image_id}.xml")
+                
+                # Load and parse the annotation file
+                tree = ET.parse(annot_file_path)
+                root = tree.getroot()
+        
+                image_path = os.path.join(self.images_path, self.all_images[index])
+                
+                # Attempt to load the image
+                image = self.load_img(image_path)
+                
+            except ValueError as e:
+                # Log the error message and skip this image
+                print(f"Error loading image: {e}")
+                return None  # Skip or handle this in a way that suits your workflow
 
             boxes = []
             labels = []
-
-            tree = ET.parse(annot_file_path)
-            root = tree.getroot()
-
-            # Box coordinates for xml files are extracted and corrected for image size
             for member in root.findall('object'):
-                labels.append(self.classes.index(member.find('Target').text))
+                label = member.find('Target').text
+                if label not in self.classes:
+                    continue  # Skip labels not in the classes
+                labels.append(self.classes.index(label))
                 x_center = float(member.find('x').text)
+                #print("x_center",x_center)
                 y_center = float(member.find('y').text)
+                #print("y_center",y_center)
                 width = float(member.find('width').text)
+                width = x_center + width
+                #print("width",width)
                 height = float(member.find('height').text)
+                height = y_center + height
+                #print("height",height)
+    
+                # Add boxes to the list only if they are valid
+                if not any(np.isnan([x_center, y_center, width, height])) and width > 0 and height > 0:
+                    boxes.append([x_center, y_center, width, height])
 
-                # Original bounding box coordinates in terms of the original image
-                xmin = (x_center - width / 2) * orig_width
-                ymin = (y_center - height / 2) * orig_height
-                xmax = (x_center + width / 2) * orig_width
-                ymax = (y_center + height / 2) * orig_height
+            boxes = np.array(boxes) if boxes else np.empty((0, 4))  # Use empty array if no valid boxes
+            area = boxes[:, 2] * boxes[:, 3] if boxes.size > 0 else torch.tensor([0], dtype=torch.float32)
+            area = torch.as_tensor(area, dtype=torch.float32)
 
-                # Ensure coordinates are within image bounds
-                xmin = max(0, xmin)
-                ymin = max(0, ymin)
-                xmax = min(orig_width, xmax)
-                ymax = min(orig_height, ymax)
+            labels = torch.tensor(labels, dtype=torch.long) if labels else torch.tensor([], dtype=torch.long)
 
-                if xmax <= xmin or ymax <= ymin:
-                    continue  # Skip invalid boxes
+            # Convert image to PIL for transformation
+            image_pil = ToPILImage()(image.astype(np.float32))
 
-                # Now scale the bounding box to match the resized image dimensions
-                xmin_resized = (xmin / orig_width) * self.width
-                ymin_resized = (ymin / orig_height) * self.height
-                xmax_resized = (xmax / orig_width) * self.width
-                ymax_resized = (ymax / orig_height) * self.height
+            if self.transforms:
+                image = self.transforms(image_pil)
 
-                xmin_resized = max(0, min(self.width, xmin_resized))
-                ymin_resized = max(0, min(self.height, ymin_resized))
-                xmax_resized = max(0, min(self.width, xmax_resized))
-                ymax_resized = max(0, min(self.height, ymax_resized))
-                
-                # Add the resized bounding box to the list
-                boxes.append([xmin_resized, ymin_resized, xmax_resized, ymax_resized])
+            # Normalize bounding boxes
+            _, h, w = image.shape
+            norm_boxes = self.normalize_bbox(boxes, rows=h, cols=w)
 
-            # Convert boxes and labels to tensors
-            boxes = torch.as_tensor(boxes, dtype=torch.float32)
-            labels = torch.as_tensor(labels, dtype=torch.int64)
+            # Filter out invalid boxes (negative or zero height/width)
+            valid_indices = (norm_boxes[:, 2] > 0) & (norm_boxes[:, 3] > 0)
+            valid_boxes = norm_boxes[valid_indices]
 
-            if boxes.shape[0] == 0:
-                return image, image_resized, [], [], [], None, None, (orig_width, orig_height)
-
-            # Calculate area and other target data
-            area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
-            iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
-
-            return image, image_resized, boxes, labels, area, iscrowd, (orig_width, orig_height)
-
-
-        def check_image_and_annotation(self, xmax, ymax, width, height):
-            """Check that all x_max and y_max are not more than the image width or height."""
-            if ymax > height:
-                ymax = height
-            if xmax > width:
-                xmax = width
-            return ymax, xmax
-
-        def __getitem__(self, idx):
-            print("Index-----------------------", idx)
-            # Load image and labels
-            if not self.mosaic:
-                image, image_resized, boxes, \
-                    labels, area, iscrowd, dims = self.load_image_and_labels(idx)
-
-            boxes = torch.as_tensor(boxes, dtype=torch.float32)
-            labels = torch.as_tensor(labels, dtype=torch.int64)
-
-            # Prepare the final `target` dictionary
+            # Prepare target dictionary only with valid boxes
             target = {}
-            target["boxes"] = boxes
-            target["labels"] = labels
-            target["area"] = area
-            target["iscrowd"] = iscrowd
-            image_id = torch.tensor([idx])
-            target["image_id"] = image_id
-
-            image_resized = (image_resized * 255).astype(np.uint8)  # Ensure the values are within uint8 range
-            image_resized = ToPILImage()(image_resized)  # Convert to PIL image
-
-            # Apply transformations directly to the PIL image
-            if self.use_train_aug:  # Use train augmentation if argument is passed.
-                image_resized = self.transforms(image_resized)
+            if valid_boxes.size > 0:
+                target['boxes'] = torch.as_tensor(valid_boxes, dtype=torch.float32)
+                target['labels'] = labels[valid_indices]  # Only keep valid labels
             else:
-                image_resized = self.transforms(image_resized)
+                # Default to an empty tensor if no valid boxes
+                target['boxes'] = torch.empty((0, 4), dtype=torch.float32)
+                target['labels'] = torch.empty((0,), dtype=torch.long)
 
-            return image_resized, target
+            target['image_id'] = torch.tensor([index])
+            target['area'] = area[valid_indices] if valid_indices.any() else torch.tensor([0], dtype=torch.float32)
+
+            return image, target
 
         def __len__(self):
             return len(self.all_images)
@@ -175,40 +146,39 @@ def transform_data():
     IMAGE_WIDTH = 800
     IMAGE_HEIGHT = 680
     classes = ['0', '1']
-    
-    # Create datasets
+
     train_dataset = CustomDataset(
         os.path.join(os.getcwd(), "output_images"),
-        os.path.join(os.getcwd(), "xml_labels"), 
-        os.path.join(os.getcwd(), "txt_labels"),
-        "Pnemonia",
-        IMAGE_WIDTH, IMAGE_HEIGHT, 
-        classes, 
+        os.path.join(os.getcwd(), "xml_labels"),
+        os.getcwd(),
+        IMAGE_WIDTH, IMAGE_HEIGHT,
+        classes,
         get_train_transform()
     )
     print("Train Dataset: ", train_dataset)
-    
+
     valid_dataset = CustomDataset(
         os.path.join(os.getcwd(), "output_images"),
-        os.path.join(os.getcwd(), "xml_labels"), 
-        os.path.join(os.getcwd(), "txt_labels"),
-        "Pnemonia",
-        IMAGE_WIDTH, IMAGE_HEIGHT, 
-        classes, 
+        os.path.join(os.getcwd(), "xml_labels"),
+        os.getcwd(),
+        IMAGE_WIDTH, IMAGE_HEIGHT,
+        classes,
         get_valid_transform()
     )
     print("Valid Dataset: ", valid_dataset)
-    
+
+    # Check a sample
     i, a = train_dataset[1347]
     print("Image: ", i)
     print("Annotations: ", a)
-    
+
+    # Pickle the datasets
     with open('train_dataset.pkl', 'wb') as f:
         pickle.dump(train_dataset, f)
-    
+
     with open('valid_dataset.pkl', 'wb') as f:
         pickle.dump(valid_dataset, f)
 
-    return train_dataset 
+    return train_dataset
 
 transform_data()
