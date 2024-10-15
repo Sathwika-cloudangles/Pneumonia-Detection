@@ -51,7 +51,7 @@ def transform_data():
                 raise ValueError(f"Image not found or unable to load: {img_path}")
             
             # Convert the image from BGR to RGB
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             return image
 
         def normalize_bbox(self, bboxes, rows, cols):
