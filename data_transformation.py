@@ -64,7 +64,6 @@ def transform_data():
             return norm_bboxes
 
         def __getitem__(self, index):
-        
             try:
                 image_id = self.all_images[index][:-4]
                 annot_file_path = os.path.join(self.labels_path, f"{image_id}.xml")
@@ -82,7 +81,7 @@ def transform_data():
                 # Log the error message and skip this image
                 print(f"Error loading image: {e}")
                 return None  # Skip or handle this in a way that suits your workflow
-
+        
             boxes = []
             labels = []
             for member in root.findall('object'):
@@ -91,40 +90,39 @@ def transform_data():
                     continue  # Skip labels not in the classes
                 labels.append(self.classes.index(label))
                 x_center = float(member.find('x').text)
-                #print("x_center",x_center)
                 y_center = float(member.find('y').text)
-                #print("y_center",y_center)
                 width = float(member.find('width').text)
                 width = x_center + width
-                #print("width",width)
                 height = float(member.find('height').text)
                 height = y_center + height
-                #print("height",height)
-    
+        
                 # Add boxes to the list only if they are valid
                 if not any(np.isnan([x_center, y_center, width, height])) and width > 0 and height > 0:
                     boxes.append([x_center, y_center, width, height])
-
+        
             boxes = np.array(boxes) if boxes else np.empty((0, 4))  # Use empty array if no valid boxes
             area = boxes[:, 2] * boxes[:, 3] if boxes.size > 0 else torch.tensor([0], dtype=torch.float32)
             area = torch.as_tensor(area, dtype=torch.float32)
-
+        
             labels = torch.tensor(labels, dtype=torch.long) if labels else torch.tensor([], dtype=torch.long)
-
+        
+            # Ensure the image is in uint8 format for ToPILImage
+            image = (image * 255).astype(np.uint8)
+        
             # Convert image to PIL for transformation
             image_pil = ToPILImage()(image)
-
+        
             if self.transforms:
                 image = self.transforms(image_pil)
-
+        
             # Normalize bounding boxes
             _, h, w = image.shape
             norm_boxes = self.normalize_bbox(boxes, rows=h, cols=w)
-
+        
             # Filter out invalid boxes (negative or zero height/width)
             valid_indices = (norm_boxes[:, 2] > 0) & (norm_boxes[:, 3] > 0)
             valid_boxes = norm_boxes[valid_indices]
-
+        
             # Prepare target dictionary only with valid boxes
             target = {}
             if valid_boxes.size > 0:
@@ -134,11 +132,12 @@ def transform_data():
                 # Default to an empty tensor if no valid boxes
                 target['boxes'] = torch.empty((0, 4), dtype=torch.float32)
                 target['labels'] = torch.empty((0,), dtype=torch.long)
-
+        
             target['image_id'] = torch.tensor([index])
             target['area'] = area[valid_indices] if valid_indices.any() else torch.tensor([0], dtype=torch.float32)
-
+        
             return image, target
+
 
         def __len__(self):
             return len(self.all_images)
