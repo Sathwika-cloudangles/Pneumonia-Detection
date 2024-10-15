@@ -112,7 +112,7 @@ def transform_data():
             labels = torch.tensor(labels, dtype=torch.long) if labels else torch.tensor([], dtype=torch.long)
 
             # Convert image to PIL for transformation
-            image_pil = ToPILImage()(image.astype(np.float32))
+            image_pil = ToPILImage()(image)
 
             if self.transforms:
                 image = self.transforms(image_pil)
