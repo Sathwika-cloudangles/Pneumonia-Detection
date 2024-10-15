@@ -23,6 +23,14 @@ def transform_data():
             T.ToTensor(),
         ])
 
+    def is_valid_xml(file_path):
+        try:
+            tree = ET.parse(file_path)
+            return True
+        except ET.ParseError as e:
+            print(f"XML ParseError for {file_path}: {e}")
+            return False
+
     class CustomDataset(Dataset):
         def __init__(self, images_path, labels_path, directory, width, height, classes, transforms=None):
             self.transforms = transforms
@@ -42,15 +50,12 @@ def transform_data():
             print("Number of images: ", len(self.all_images))
 
         def load_img(self, img_path):
-            # Load the image
             print("img_path-------------------", img_path)
             image = cv2.imread(img_path)
-            
-            # Check if the image was loaded successfully
+
             if image is None:
                 raise ValueError(f"Image not found or unable to load: {img_path}")
-            
-            # Convert the image from BGR to RGB
+
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             return image
 
@@ -64,24 +69,30 @@ def transform_data():
             return norm_bboxes
 
         def __getitem__(self, index):
+        
+        
             try:
                 image_id = self.all_images[index][:-4]
                 annot_file_path = os.path.join(self.labels_path, f"{image_id}.xml")
-                
-                # Load and parse the annotation file
+
+                # Validate XML before parsing
+                if not is_valid_xml(annot_file_path):
+                    print(f"Skipping corrupted or empty XML: {annot_file_path}")
+                    return None  # You can return a default image and empty target here if necessary
+
+                # Parse the annotation file
                 tree = ET.parse(annot_file_path)
                 root = tree.getroot()
-        
+
                 image_path = os.path.join(self.images_path, self.all_images[index])
-                
+
                 # Attempt to load the image
                 image = self.load_img(image_path)
-                
+
             except ValueError as e:
-                # Log the error message and skip this image
                 print(f"Error loading image: {e}")
-                return None  # Skip or handle this in a way that suits your workflow
-        
+                return None  # Skip this image
+
             boxes = []
             labels = []
             for member in root.findall('object'):
@@ -95,49 +106,41 @@ def transform_data():
                 width = x_center + width
                 height = float(member.find('height').text)
                 height = y_center + height
-        
-                # Add boxes to the list only if they are valid
+
                 if not any(np.isnan([x_center, y_center, width, height])) and width > 0 and height > 0:
                     boxes.append([x_center, y_center, width, height])
-        
+
             boxes = np.array(boxes) if boxes else np.empty((0, 4))  # Use empty array if no valid boxes
             area = boxes[:, 2] * boxes[:, 3] if boxes.size > 0 else torch.tensor([0], dtype=torch.float32)
             area = torch.as_tensor(area, dtype=torch.float32)
-        
+
             labels = torch.tensor(labels, dtype=torch.long) if labels else torch.tensor([], dtype=torch.long)
-        
-            # Ensure the image is in uint8 format for ToPILImage
+
             image = (image * 255).astype(np.uint8)
-        
-            # Convert image to PIL for transformation
+
             image_pil = ToPILImage()(image)
-        
+
             if self.transforms:
                 image = self.transforms(image_pil)
-        
-            # Normalize bounding boxes
+
             _, h, w = image.shape
             norm_boxes = self.normalize_bbox(boxes, rows=h, cols=w)
-        
-            # Filter out invalid boxes (negative or zero height/width)
+
             valid_indices = (norm_boxes[:, 2] > 0) & (norm_boxes[:, 3] > 0)
             valid_boxes = norm_boxes[valid_indices]
-        
-            # Prepare target dictionary only with valid boxes
+
             target = {}
             if valid_boxes.size > 0:
                 target['boxes'] = torch.as_tensor(valid_boxes, dtype=torch.float32)
-                target['labels'] = labels[valid_indices]  # Only keep valid labels
+                target['labels'] = labels[valid_indices]
             else:
-                # Default to an empty tensor if no valid boxes
                 target['boxes'] = torch.empty((0, 4), dtype=torch.float32)
                 target['labels'] = torch.empty((0,), dtype=torch.long)
-        
+
             target['image_id'] = torch.tensor([index])
             target['area'] = area[valid_indices] if valid_indices.any() else torch.tensor([0], dtype=torch.float32)
-        
-            return image, target
 
+            return image, target
 
         def __len__(self):
             return len(self.all_images)
@@ -166,12 +169,10 @@ def transform_data():
     )
     print("Valid Dataset: ", valid_dataset)
 
-    # Check a sample
     i, a = train_dataset[1347]
     print("Image: ", i)
     print("Annotations: ", a)
 
-    # Pickle the datasets
     with open('train_dataset.pkl', 'wb') as f:
         pickle.dump(train_dataset, f)
 
